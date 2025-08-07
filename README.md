@@ -1,0 +1,5 @@
+# ResearchPaper_MotionPro
+CVPR2025で発表されたMotionProという論文の実装に関するレポです。
+論文ではGRADIOでしたが、GOOGLE　COLABで実装するためのコードおよびローカルで学習やベンチマーク実行などの実装をするための
+忘備録としてここにコードを上げてみます。
+https://arxiv.org/abs/2505.20287
