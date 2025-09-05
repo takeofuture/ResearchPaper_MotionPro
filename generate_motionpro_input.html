@@ -184,8 +184,8 @@
     redrawTraj();
   }
   function setCanvasSize(w, h) {
-    imgW = w;            // ★ 追加
-    imgH = h;            // ★ 追加
+    imgW = w;            
+    imgH = h;            
     [imgCanvas, maskCanvas, trajCanvas, maskBinary].forEach(c => {
       c.width = w; c.height = h;
       c.style.width = w + 'px';
@@ -255,7 +255,7 @@
     const mode = currentMode();
     maskTools.classList.toggle('hidden', mode !== 'mask');
     trajTools.classList.toggle('hidden', mode !== 'traj');
-    setCanvasInteractivity(mode);   // ← これを追加
+    setCanvasInteractivity(mode);   
   }
   modeRadios.forEach(r => r.addEventListener('change', updateToolsVisibility));
   updateToolsVisibility();
@@ -291,7 +291,6 @@
     drawing = false;
     try { maskCanvas.releasePointerCapture(evt.pointerId); } catch (_) {}
   }
-  // 既存の mousedown/mousemove/mouseup は削除し、こちらを登録
   maskCanvas.addEventListener('pointerdown', onPointerDownMask);
   maskCanvas.addEventListener('pointermove',  onPointerMoveMask);
   window.addEventListener('pointerup',        onPointerUpMask);
@@ -360,7 +359,7 @@
   // クリックで点を追加（ダブルクリックの2回目は無視）
   trajCanvas.addEventListener('click', (e) => {
     if (currentMode() !== 'traj') return;
-    // ★ ここがポイント：ダブルクリックの2回目 click(detail=2) を無視
+    // ★ ダブルクリックの2回目 click(detail=2) を無視
     if (e.detail > 1) return;
     const {x, y} = getXY(trajCanvas, e);
     const last = currentPath[currentPath.length - 1];
@@ -462,7 +461,7 @@
       gifResult.innerHTML = "";
       // <img> を作って data URL をセット
       const img = new Image();
-      img.src = js.gif_b64;                  // ← ここがポイント
+      img.src = js.gif_b64;                  
       img.alt = `motion gif ${js.token}`;
       img.style.maxWidth = "100%";
       // ダウンロードリンク（任意）
