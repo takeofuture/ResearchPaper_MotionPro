@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mask & Trajectory Annotator (HTML5)</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .controls { display: grid; gap: 8px; grid-template-columns: 1fr; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .row label { margin-right: 6px; }
+  #wrap { position: relative; display: inline-block; border: 1px solid #ddd; }
+  canvas { position: absolute; left: 0; top: 0; image-rendering: pixelated; }
+  #imgCanvas { z-index: 0; background: #fafafa; pointer-events: none; }
+  #maskCanvas { z-index: 10; pointer-events: auto; cursor: crosshair; touch-action: none; }
+  #trajCanvas { z-index: 20; pointer-events: none; touch-action: none; }
+  .small { font-size: 12px; color: #666; }
+  button { padding: 6px 10px; border-radius: 8px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+  button:hover { background: #f6f6f6; }
+  input[type="range"] { vertical-align: middle; }
+  pre { background: #0b1021; color: #cde3ff; padding: 8px; border-radius: 8px; max-width: 900px; overflow:auto;}
+  .hidden { display: none; }
+  /* === Spinner overlay === */
+  #spinnerOverlay.hidden { display: none; }
+  #spinnerOverlay{
+    position: fixed; inset: 0; z-index: 10000;
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    background: rgba(0,0,0,.35);
+  }
+  #spinnerOverlay .loader{
+    width: 46px; height: 46px; border-radius: 50%;
+    border: 4px solid rgba(255,255,255,.35);
+    border-top-color: #fff; animation: spin 1s linear infinite;
+  }
+  #spinnerOverlay .label{ color:#fff; font-size: 14px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <h1>Mask & Trajectory Annotator (HTML5)</h1>
+  <div class="controls">
+    <div class="row">
+      <input type="file" id="fileInput" accept="image/*" />
+      <span class="small">画像を選ぶと下に表示されます（処理はすべてローカルで完結）。</span>
+    </div>
+    <div class="row">
+      <label>Mode:</label>
+      <label><input type="radio" name="mode" value="mask" checked> Mask（ブラシ）</label>
+      <label><input type="radio" name="mode" value="traj"> Trajectory（軌跡）</label>
+      <label><input type="checkbox" id="showMask" checked> マスクを重ねて表示</label>
+    </div>
+    <!-- Mask tools -->
+    <div id="maskTools" class="row">
+      <button id="dlImg">Download Image PNG</button>
+      <label>Brush:</label>
+      <input type="range" id="brushSize" min="2" max="120" value="40">
+      <span id="brushVal">40</span>px
+      <label>Opacity:</label>
+      <input type="range" id="maskAlpha" min="0" max="1" step="0.05" value="0.55">
+      <span id="alphaVal">0.55</span>
+      <label><input type="checkbox" id="eraser"> Eraser</label>
+      <button id="clearMask">Clear Mask</button>
+      <button id="dlMask">Download Mask PNG</button>
+    </div>
+    <!-- Trajectory tools -->
+    <div id="trajTools" class="row hidden">
+      <button id="startPath">Start New Path</button>
+      <button id="finishPath">Finish Path</button>
+      <button id="undoPoint">Undo Point</button>
+      <button id="clearTraj">Clear All</button>
+      <button id="dlTraj">Download Trajectories JSON</button>
+      <span class="small">※ ダブルクリック/右クリック/Enterでもパス確定</span>
+    </div>
+  </div>
+  <div id="wrap">
+    <canvas id="imgCanvas"></canvas>
+    <canvas id="maskCanvas"></canvas>
+    <canvas id="trajCanvas"></canvas>
+  </div>
+  <button id="sendFlask">Send to Flask to add motion</button>
+  <h3>Trajectory JSON（プレビュー）</h3>
+  <pre id="jsonOut">[]</pre>
+  <h3>Result GIF</h3>
+  <div id="gifResult"></div>
+  <!-- Spinner overlay -->
+  <div id="spinnerOverlay" class="hidden" role="status" aria-live="polite">
+    <div class="loader"></div>
+    <div class="label" id="spinnerText">処理中…</div>
+  </div>
+<script>
+(() => {
+  // DOM
+  const fileInput  = document.getElementById('fileInput');
+  const imgCanvas  = document.getElementById('imgCanvas');
+  const maskCanvas = document.getElementById('maskCanvas');
+  const trajCanvas = document.getElementById('trajCanvas');
+  const wrap       = document.getElementById('wrap');
+  const maskTools  = document.getElementById('maskTools');
+  const trajTools  = document.getElementById('trajTools');
+  const showMask   = document.getElementById('showMask');
+  const brushSize  = document.getElementById('brushSize');
+  const brushVal   = document.getElementById('brushVal');
+  const maskAlpha  = document.getElementById('maskAlpha');
+  const alphaVal   = document.getElementById('alphaVal');
+  const eraser     = document.getElementById('eraser');
+  const clearMask  = document.getElementById('clearMask');
+  const dlMask     = document.getElementById('dlMask');
+  const dlImg = document.getElementById('dlImg');
+  const startPath  = document.getElementById('startPath');
+  const finishPath = document.getElementById('finishPath');
+  const undoPoint  = document.getElementById('undoPoint');
+  const clearTraj  = document.getElementById('clearTraj');
+  const dlTraj     = document.getElementById('dlTraj');
+  const jsonOut    = document.getElementById('jsonOut');
+  const modeRadios = Array.from(document.querySelectorAll('input[name="mode"]'));
+  // 2値マスク保持用（黒/白）
+  const maskBinary = document.createElement('canvas');
+  const mCtx = maskBinary.getContext('2d', { willReadFrequently: true });
+  // 表示用
+  const iCtx = imgCanvas.getContext('2d');
+  const oCtx = maskCanvas.getContext('2d'); // overlay(red)
+  const tCtx = trajCanvas.getContext('2d');
+  // 状態
+  let imgW = 0, imgH = 0;
+  let drawing = false;
+  let lastX = 0, lastY = 0;
+  // 軌跡（複数ポリライン）
+  let paths = [];       // 完了済み: [[{x,y},...], ...]
+  let currentPath = []; // 進行中
+  //FLASK
+  const sendFlask = document.getElementById('sendFlask');
+  const FLASK_BASE = 'https://your-api-site-url';
+  const SAVE_ENDPOINT = `${FLASK_BASE}/api/add_motion`;
+  const gifResult = document.getElementById('gifResult');
+  //SPINNER
+  const spinnerOverlay = document.getElementById('spinnerOverlay');
+  const spinnerText    = document.getElementById('spinnerText');
+  function showSpinner(text = '処理中…') {
+    spinnerText.textContent = text;
+    spinnerOverlay.classList.remove('hidden');
+  }
+  function hideSpinner() {
+    spinnerOverlay.classList.add('hidden');
+  }
+  // ===== Utility =====
+  function chooseTargetWH(rawW, rawH) {
+    // 候補 (W,H) は demo_sparse_flex_wh.py と同じ
+    const cand = [{w:512,h:320}, {w:512,h:512}, {w:320,h:512}];
+    const asp  = rawW / rawH;
+    let best = cand[0], bestDiff = Math.abs(asp - cand[0].w / cand[0].h);
+    for (let i=1;i<cand.length;i++) {
+      const d = Math.abs(asp - cand[i].w / cand[i].h);
+      if (d < bestDiff) { best = cand[i]; bestDiff = d; }
+    }
+    return best; // {w, h}
+  }
+  function drawPreprocessedImageToCanvas(img) {
+    const rawW = img.naturalWidth, rawH = img.naturalHeight;
+    const {w:targetW, h:targetH} = chooseTargetWH(rawW, rawH);
+    // 等比で「覆う（cover）」倍率
+    const ratio = Math.max(targetW/rawW, targetH/rawH);
+    const newW  = Math.ceil(rawW * ratio);
+    const newH  = Math.ceil(rawH * ratio);
+    // 一旦オフスクリーンで拡大
+    const tmp = document.createElement('canvas');
+    tmp.width = newW; tmp.height = newH;
+    const tmpCtx = tmp.getContext('2d');
+    tmpCtx.imageSmoothingEnabled = true;
+    tmpCtx.imageSmoothingQuality = 'high';
+    tmpCtx.drawImage(img, 0, 0, newW, newH);
+    // 中央で切り抜き
+    const cropX = Math.floor((newW - targetW) / 2);
+    const cropY = Math.floor((newH - targetH) / 2);
+    // 最終キャンバスへ描画（3面＋バイナリマスクも同サイズへ）
+    setCanvasSize(targetW, targetH);
+    iCtx.clearRect(0,0,targetW,targetH);
+    iCtx.drawImage(tmp, cropX, cropY, targetW, targetH, 0, 0, targetW, targetH);
+    // オーバーレイと軌跡の初期化
+    clearOverlay();
+    resetBinaryMask();
+    paths = [];
+    currentPath = [];
+    redrawTraj();
+  }
+  function setCanvasSize(w, h) {
+    imgW = w;            // ★ 追加
+    imgH = h;            // ★ 追加
+    [imgCanvas, maskCanvas, trajCanvas, maskBinary].forEach(c => {
+      c.width = w; c.height = h;
+      c.style.width = w + 'px';
+      c.style.height = h + 'px';
+    });
+    wrap.style.width = w + 'px';
+    wrap.style.height = h + 'px';
+  }
+  function clearOverlay() { oCtx.clearRect(0,0,imgW,imgH); }
+  function resetBinaryMask() {
+    mCtx.clearRect(0,0,imgW,imgH);
+    mCtx.fillStyle = 'black';
+    mCtx.fillRect(0,0,imgW,imgH);
+  }
+  function getXY(canvas, evt) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+      x: Math.round((evt.clientX - rect.left) * scaleX),
+      y: Math.round((evt.clientY - rect.top)  * scaleY)
+    };
+  }
+  function drawLine(ctx, x0, y0, x1, y1, w, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = w;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+  }
+  // ===== 画像読込 =====
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      // ★ Gradio 相当のリサイズ＋センタークロップで描画
+      drawPreprocessedImageToCanvas(img);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  });
+  // ===== モード切替 =====
+  function currentMode() {
+    return modeRadios.find(r => r.checked).value; // "mask" | "traj"
+  }
+  function setCanvasInteractivity(mode) {
+    if (mode === 'mask') {
+      // マスクを受け付け、軌跡は透過
+      maskCanvas.style.pointerEvents = 'auto';
+      maskCanvas.style.cursor = 'crosshair';
+      trajCanvas.style.pointerEvents = 'none';
+      trajCanvas.style.cursor = 'default';
+    } else {
+      // 軌跡を受け付け、マスクは透過
+      maskCanvas.style.pointerEvents = 'none';
+      maskCanvas.style.cursor = 'default';
+      trajCanvas.style.pointerEvents = 'auto';
+      trajCanvas.style.cursor = 'crosshair';
+    }
+  }
+  function updateToolsVisibility() {
+    const mode = currentMode();
+    maskTools.classList.toggle('hidden', mode !== 'mask');
+    trajTools.classList.toggle('hidden', mode !== 'traj');
+    setCanvasInteractivity(mode);   // ← これを追加
+  }
+  modeRadios.forEach(r => r.addEventListener('change', updateToolsVisibility));
+  updateToolsVisibility();
+  // ===== マスク（ブラシ/消しゴム） Pointer Events 版 =====
+  // === 追加：マスク用のストローク描画関数 ===
+  function drawMaskStroke(x, y, x0 = x, y0 = y) {
+    const w     = parseInt(brushSize.value, 10);
+    const alpha = parseFloat(maskAlpha.value || '0.55');
+    // 表示オーバーレイ（赤）
+    oCtx.globalCompositeOperation = eraser.checked ? 'destination-out' : 'source-over';
+    drawLine(oCtx, x0, y0, x, y, w, `rgba(255,0,0,${eraser.checked ? 1 : alpha})`);
+    oCtx.globalCompositeOperation = 'source-over';
+    // 2値マスク（白=描画, 黒=消去）
+    drawLine(mCtx, x0, y0, x, y, w, eraser.checked ? '#000000' : '#ffffff');
+  }
+  function onPointerDownMask(evt) {
+    if (currentMode() !== 'mask') return;
+    evt.preventDefault();
+    drawing = true;
+    try { maskCanvas.setPointerCapture(evt.pointerId); } catch (_) {}
+    const { x, y } = getXY(maskCanvas, evt);
+    lastX = x; lastY = y;
+    drawMaskStroke(x, y); // ドット
+  }
+  function onPointerMoveMask(evt) {
+    if (!drawing || currentMode() !== 'mask') return;
+    evt.preventDefault();
+    const { x, y } = getXY(maskCanvas, evt);
+    drawMaskStroke(x, y, lastX, lastY);  // 線
+    lastX = x; lastY = y;
+  }
+  function onPointerUpMask(evt) {
+    drawing = false;
+    try { maskCanvas.releasePointerCapture(evt.pointerId); } catch (_) {}
+  }
+  // 既存の mousedown/mousemove/mouseup は削除し、こちらを登録
+  maskCanvas.addEventListener('pointerdown', onPointerDownMask);
+  maskCanvas.addEventListener('pointermove',  onPointerMoveMask);
+  window.addEventListener('pointerup',        onPointerUpMask);
+  brushSize.addEventListener('input', () => brushVal.textContent = brushSize.value);
+  maskAlpha.addEventListener('input', () => alphaVal.textContent = maskAlpha.value);
+  showMask.addEventListener('change', () => {
+    maskCanvas.style.display = showMask.checked ? 'block' : 'none';
+  });
+  dlImg.addEventListener('click', () => {
+    if (!imgCanvas.width) return;                 // 画像未ロードなら何もしない
+    imgCanvas.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement('a');
+      a.download = 'image.png';                   // リサイズ＆クロップ後のPNG
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }, 'image/png');
+  });
+  clearMask.addEventListener('click', () => { clearOverlay(); resetBinaryMask(); });
+  dlMask.addEventListener('click', () => {
+    if (imgW === 0) return;
+    const link = document.createElement('a');
+    link.download = 'mask.png';
+    link.href = maskBinary.toDataURL('image/png'); // 白黒2値マスク
+    link.click();
+  });
+  // ===== 軌跡（連続クリックで延長、確定で1本化） =====
+  // --- 重複判定の許容誤差（px） ---
+  const EPS = 2;
+  function near(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y) < EPS;
+  }
+  // ===== 軌跡（連続クリックで延長、確定で1本化） =====
+  function redrawTraj() {
+    tCtx.clearRect(0,0,imgW,imgH);
+    // 完了済み
+    tCtx.lineWidth = 3;
+    tCtx.lineCap = 'round';
+    tCtx.lineJoin = 'round';
+    tCtx.strokeStyle = '#00aa55';
+    tCtx.fillStyle = '#00aa55';
+    for (const path of paths) {
+      for (let i=1;i<path.length;i++) {
+        tCtx.beginPath();
+        tCtx.moveTo(path[i-1].x, path[i-1].y);
+        tCtx.lineTo(path[i].x, path[i].y);
+        tCtx.stroke();
+      }
+      for (const p of path) { tCtx.beginPath(); tCtx.arc(p.x,p.y,3,0,Math.PI*2); tCtx.fill(); }
+    }
+    // 進行中
+    tCtx.strokeStyle = '#22ccff';
+    tCtx.fillStyle   = '#22ccff';
+    for (let i=1;i<currentPath.length;i++) {
+      tCtx.beginPath();
+      tCtx.moveTo(currentPath[i-1].x, currentPath[i-1].y);
+      tCtx.lineTo(currentPath[i].x, currentPath[i].y);
+      tCtx.stroke();
+    }
+    for (const p of currentPath) { tCtx.beginPath(); tCtx.arc(p.x,p.y,3,0,Math.PI*2); tCtx.fill(); }
+    // JSONプレビュー（完了済みのみ）
+    const json = paths.map(path => path.map(p => [p.x, p.y]));
+    jsonOut.textContent = JSON.stringify(json, null, 2);
+  }
+  // クリックで点を追加（ダブルクリックの2回目は無視）
+  trajCanvas.addEventListener('click', (e) => {
+    if (currentMode() !== 'traj') return;
+    // ★ ここがポイント：ダブルクリックの2回目 click(detail=2) を無視
+    if (e.detail > 1) return;
+    const {x, y} = getXY(trajCanvas, e);
+    const last = currentPath[currentPath.length - 1];
+    // ★ 直前の点とほぼ同じなら追加しない（誤差吸収）
+    if (last && Math.hypot(x - last.x, y - last.y) < EPS) return;
+    currentPath.push({x, y});
+    redrawTraj();
+  });
+  // 確定（Finish Path / ダブルクリック / 右クリック）
+  function finishCurrentPath() {
+    if (currentMode() !== 'traj') return;
+
+    // ★ 末尾が重複していたら落とす（2重・3重でもOK）
+    while (currentPath.length >= 2) {
+      const a = currentPath[currentPath.length - 1];
+      const b = currentPath[currentPath.length - 2];
+      if (near(a, b)) currentPath.pop();
+      else break;
+    }
+    if (currentPath.length >= 2) paths.push(currentPath.slice());
+    currentPath = [];
+    redrawTraj();
+  }
+  trajCanvas.addEventListener('dblclick', () => finishCurrentPath());
+  trajCanvas.addEventListener('contextmenu', (e) => { e.preventDefault(); finishCurrentPath(); });
+  startPath.addEventListener('click', () => { currentPath = []; redrawTraj(); });
+  finishPath.addEventListener('click', () => finishCurrentPath());
+  undoPoint.addEventListener('click', () => {
+    if (currentPath.length > 0) currentPath.pop();
+    else if (paths.length > 0 && paths[paths.length-1].length > 0) paths[paths.length-1].pop();
+    redrawTraj();
+  });
+  clearTraj.addEventListener('click', () => { paths = []; currentPath = []; redrawTraj(); });
+  dlTraj.addEventListener('click', () => {
+    const json = paths.map(path => path.map(p => [p.x, p.y]));
+    const blob = new Blob([JSON.stringify(json, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.download = 'trajectory.json'; a.href = url; a.click();
+    URL.revokeObjectURL(url);
+  });
+  // ショートカット（Enterで確定 / BackspaceでUndo）
+  window.addEventListener('keydown', (e) => {
+    if (currentMode() !== 'traj') return;
+    if (e.key === 'Enter') finishCurrentPath();
+    if (e.key === 'Backspace') { e.preventDefault(); undoPoint.click(); }
+  });
+  //FLASK
+  // Blob → dataURL(base64)
+  function blobToDataURL(blob) {
+    return new Promise((resolve) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.readAsDataURL(blob);
+    });
+  }
+  // 送信本体
+  async function sendToFlaskSaveOnly() {
+    if (!imgCanvas.width) {
+      alert('先に画像を読み込んでください。');
+      return;
+    }
+    // まだ確定していない現在のパスがあるなら自動的に含める（2点以上のとき）
+    let allPaths = paths.slice();
+    if (currentPath.length >= 2) allPaths = [...allPaths, currentPath.slice()];
+    const traj = allPaths.map(path => path.map(p => [p.x, p.y]));
+    // 画像＆マスクを PNG → dataURL(base64) 化
+    const [imgBlob, maskBlob] = await Promise.all([
+      new Promise(res => imgCanvas.toBlob(res, 'image/png')),
+      new Promise(res => maskBinary.toBlob(res, 'image/png')),
+    ]);
+    const [image_b64, mask_b64] = await Promise.all([
+      blobToDataURL(imgBlob),
+      blobToDataURL(maskBlob),
+    ]);
+    // 送信
+    sendFlask.disabled = true;
+    sendFlask.textContent = 'Sending...';
+    showSpinner('アニメ生成中…');
+    try {
+      const resp = await fetch(SAVE_ENDPOINT, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ image_b64, mask_b64, trajectory: traj })
+      });
+      const js = await resp.json().catch(() => ({ok:false, error:'Invalid JSON response'}));
+      if (!resp.ok || !js.ok) {
+        throw new Error(js.error || resp.statusText);
+      }
+      // 成功
+      console.log('Flask 保存成功:', js);
+      alert(
+        `保存しました:\n` +
+        `image: ${js.paths.image}\n` +
+        `mask:  ${js.paths.mask}\n` +
+        `track: ${js.paths.trajectory}\n` +
+        `token: ${js.token}`
+      );
+      // 旧い結果をクリア
+      gifResult.innerHTML = "";
+      // <img> を作って data URL をセット
+      const img = new Image();
+      img.src = js.gif_b64;                  // ← ここがポイント
+      img.alt = `motion gif ${js.token}`;
+      img.style.maxWidth = "100%";
+      // ダウンロードリンク（任意）
+      const dl = document.createElement('a');
+      dl.href = js.gif_b64;                  // data URL のままダウンロード可
+      dl.download = `${js.token}_motion.gif`;
+      dl.textContent = "Download GIF";
+      dl.style.display = "inline-block";
+      dl.style.marginTop = "8px";
+      // DOM に挿入
+      gifResult.appendChild(img);
+      gifResult.appendChild(document.createElement('br'));
+      gifResult.appendChild(dl);
+    } catch (err) {
+      console.error('Flask 保存エラー:', err);
+      alert('Flask 保存エラー: ' + err.message);
+    } finally {
+      sendFlask.disabled = false;
+      sendFlask.textContent = 'Send to Flask';
+　　　hideSpinner();
+    }
+  }
+  // 送信ボタン
+  sendFlask.addEventListener('click', sendToFlaskSaveOnly);
+  // 画像がロードされたらボタン有効化（初期は無効でもOK）
+  function updateSendButtonState() {
+    sendFlask.disabled = !(imgCanvas.width && imgCanvas.height);
+  }
+  // 画像読み込み後の描画関数の末尾あたりで呼ばれるようにしておく
+  const _origDrawPreprocessed = drawPreprocessedImageToCanvas;
+  drawPreprocessedImageToCanvas = function(img) {
+    _origDrawPreprocessed(img);
+    updateSendButtonState();
+  };
+  // 初期状態
+  updateSendButtonState();
+})();
+</script>
+</body>
+</html>
